@@ -562,6 +562,7 @@ int command(struct grid* g) {
       g->cr++;
     } else if (ch == 'N') {
       g->tc = g->tr = 0;
+      g->vc = g->vr = 0;
     }
   } else if (ch == 'S') {
     mvprintw(1, 0, "Storage: (L)oad, (S)ave, or save & (Q)uit?"), clrtoeol();
@@ -762,7 +763,7 @@ void loop(struct grid* g) {
       entry(g, 1, 0);
     } else if (ch == '+' || ch == '-' || ch == '(' || ch == '@' || ch == '.' || isdigit(ch)) {
       entry(g, 0, ch);
-    } else {
+    } else if (ch >= 32 && ch < 127) {
       entry(g, 1, ch);
     }
   }
