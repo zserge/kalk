@@ -1,0 +1,138 @@
+.TH KALK 1 "2026-03-15" "kalk" "User Commands"
+.SH NAME
+kalk \- a minimal terminal spreadsheet
+.SH SYNOPSIS
+.B kalk
+.RI [ file.csv ]
+.SH DESCRIPTION
+.B kalk
+is a minimal VisiCalc-inspired spreadsheet for the terminal.
+It reads and writes CSV files and supports formulas, cell formatting,
+row/column operations, and title locking.
+.PP
+The grid supports columns A\-IV (256) and rows 1\-1024.
+.SH NAVIGATION
+.TP
+.B Arrow keys
+Move cursor
+.TP
+.B Tab
+Move to next column
+.TP
+.B Enter
+Move to next row
+.TP
+.B Home
+Jump to cell A1 (or first unlocked cell)
+.TP
+.B >
+Go to a specific cell (type reference, e.g. B12)
+.SH ENTERING DATA
+.PP
+Type a number, formula, or label directly. Formulas start with
+.BR + ", " \- ", " ( ", or " @ .
+Labels can be entered directly or prefixed with
+.BR \(dq .
+.TP
+.B Backspace/Delete
+Clear current cell
+.TP
+.B !
+Force recalculation
+.SH FORMULAS
+.PP
+Formulas support arithmetic operators (+, \-, *, /), parentheses, cell
+references (e.g. A1, $B$2), and functions:
+.TP
+.B @SUM(range)
+Sum of values in range (e.g. @SUM(A1...A10))
+.TP
+.B @ABS(expr)
+Absolute value
+.TP
+.B @INT(expr)
+Integer part (truncate)
+.TP
+.B @SQRT(expr)
+Square root
+.PP
+Cell references can use
+.B $
+to mark absolute columns or rows:
+.B $A1
+(absolute column),
+.B A$1
+(absolute row),
+.B $A$1
+(both).
+Absolute references are preserved during replicate operations.
+.SH COMMANDS
+.PP
+Press
+.B /
+to enter command mode. Available commands:
+.TP
+.B /B
+Blank current cell (clear value, keep format)
+.TP
+.B /C
+Clear entire spreadsheet
+.TP
+.B /D R\fR,\fB /D C
+Delete current row or column
+.TP
+.B /I R\fR,\fB /I C
+Insert row or column at cursor
+.TP
+.B /F \fIformat\fR
+Set cell format: L(eft) R(ight) I(nteger) G(eneral) D(efault) $(dollar) %(percent) *(bar graph)
+.TP
+.B /GC
+Set global column width (4\-20)
+.TP
+.B /GF \fIformat\fR
+Set global default format
+.TP
+.B /M
+Move row or column (use arrow keys to drag, Enter to confirm, Esc to cancel)
+.TP
+.B /R
+Replicate (copy) cells. Select source range, then target location. Formulas
+adjust relative references automatically.
+.TP
+.B /SL
+Load CSV file
+.TP
+.B /SS
+Save CSV file
+.TP
+.B /SQ
+Save and quit
+.TP
+.B /TV\fR,\fB /TH\fR,\fB /TB\fR,\fB /TN
+Lock title rows/columns: Vertical, Horizontal, Both, or None
+.TP
+.B /Q
+Quit (prompts if unsaved changes)
+.SH FILES
+.PP
+kalk reads and writes standard CSV files. Formulas are stored as entered
+(e.g. +A1+B1) and recalculated on load.
+.SH EXIT STATUS
+.TP
+.B 0
+Normal exit
+.TP
+.B 1
+Error (e.g. failed to load file)
+.SH EXAMPLES
+.TP
+.B kalk
+Start with an empty spreadsheet
+.TP
+.B kalk budget.csv
+Open an existing CSV file
+.SH AUTHOR
+Serge Zaitsev
+.SH LICENSE
+MIT License. See LICENSE file for details.
