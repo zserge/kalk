@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <ctype.h>
 #include <math.h>
@@ -687,7 +686,7 @@ static void fmtrange(char* buf, int sz, int c1, int r1, int c2, int r2) {
   if (c1 == c2 && r1 == r2) {
     snprintf(buf, sz, "%s%d", col(c1), r1 + 1);
   } else {
-    char a[16];
+    char a[8];
     snprintf(a, sizeof(a), "%s%d", col(c1), r1 + 1);
     snprintf(buf, sz, "%s...%s%d", a, col(c2), r2 + 1);
   }
@@ -702,7 +701,7 @@ static int selectrange(struct grid* g, const char* prompt, int ac, int ar, int* 
   g->cc = ac;
   g->cr = ar;
   for (;;) {
-    char rng[MAXIN + 4];
+    char rng[32];
     if (typed) {
       snprintf(rng, sizeof(rng), "%s_", buf);
     } else {
@@ -781,7 +780,7 @@ void replcmd(struct grid* g) {
   char buf[MAXIN] = {0};
   int n = 0, typed = 0;
   for (;;) {
-    char tgt[MAXIN + 4];
+    char tgt[32];
     int tc = typed ? -1 : g->cc, tr = typed ? -1 : g->cr;
     if (typed) {
       snprintf(tgt, sizeof(tgt), "%s_", buf);
@@ -1163,7 +1162,7 @@ int main(int argc, char* argv[]) {
 }
 #else
 void test_expr(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
   struct parser p = {0};
   g.cells[0][0].type = NUM;
   g.cells[0][0].val = 3.0f;
@@ -1211,7 +1210,7 @@ void test_expr(void) {
 }
 
 void test_recalc(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
   // testing re-evaluation
   setcell(&g, 0, 0, "5");
   setcell(&g, 0, 1, "7");
@@ -1246,7 +1245,7 @@ void test_col(void) {
 }
 
 void test_csv_load(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
 
   // basic CSV: numbers, labels, formulas
   {
@@ -1308,7 +1307,7 @@ void test_csv_load(void) {
 }
 
 void test_csv_save(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
 
   setcell(&g, 0, 0, "100");
   setcell(&g, 1, 0, "200");
@@ -1330,7 +1329,7 @@ void test_csv_save(void) {
 }
 
 void test_csv_roundtrip(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
 
   // field with embedded quote
   setcell(&g, 0, 0, "say \"hello\"");
@@ -1346,7 +1345,7 @@ void test_csv_roundtrip(void) {
 }
 
 void test_swap(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
 
   // Setup: A1=10 A2=20 A3=30, B1=100 B2=200 B3=300
   setcell(&g, 0, 0, "10");
@@ -1383,7 +1382,7 @@ void test_swap(void) {
 }
 
 void test_fixrefs(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
 
   // Setup: A1=10, A2=20, formula in B1 referencing A1 and A2
   setcell(&g, 0, 0, "10");
@@ -1480,7 +1479,7 @@ void test_fixrefs(void) {
 }
 
 void test_insert_delete(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
 
   // --- Insert row: data shifts down, refs adjust ---
   setcell(&g, 0, 0, "10");   // A1=10
@@ -1610,7 +1609,7 @@ void test_insert_delete(void) {
 }
 
 void test_replicate(void) {
-  struct grid g = {0};
+  static struct grid g = {0};
 
   // Replicate a number: plain copy
   setcell(&g, 0, 0, "42");
