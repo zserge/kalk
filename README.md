@@ -1,5 +1,7 @@
 # kalk
 
+![screenshot](kalk.png)
+
 A minimal spreadsheet for the terminal. Single C file, no dependencies
 beyond ncurses.
 
