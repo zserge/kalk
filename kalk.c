@@ -15,7 +15,7 @@ struct cell {
   int type;
   float val;
   char text[MAXIN];  // raw user input
-  int fmt;           // 0=general 'I'=integer '$'=dollar 'L'=left 'R'=right
+  int fmt;  // 0=general 'I'=integer 'D'=default '$'=dollar '%'=percent '*'=graph 'L'=left 'R'=right
 };
 
 struct grid {
@@ -31,6 +31,7 @@ struct parser {
 
 float expr(struct parser* p);
 int ref(const char* s, int* col, int* row);
+int refabs(const char* s, int* col, int* row, int* absc, int* absr);
 static char* col(int c);
 
 struct cell* cell(struct grid* g, int c, int r) {
@@ -53,6 +54,16 @@ void recalc(struct grid* g) {
   }
 }
 
+// Emit a cell reference into buf, preserving $ markers.
+static int emitref(char* buf, int bufsz, int rc, int rr, int ac, int ar) {
+  int oi = 0;
+  if (ac && oi < bufsz) buf[oi++] = '$';
+  oi += snprintf(buf + oi, bufsz - oi, "%s", col(rc));
+  if (ar && oi < bufsz) buf[oi++] = '$';
+  oi += snprintf(buf + oi, bufsz - oi, "%d", rr + 1);
+  return oi;
+}
+
 // Rewrite cell references in all formulas after swapping two adjacent rows or columns.
 // axis='R': rows a and b swapped. axis='C': columns a and b swapped.
 static void fixrefs(struct grid* g, int axis, int a, int b) {
@@ -64,7 +75,7 @@ static void fixrefs(struct grid* g, int axis, int a, int b) {
       int oi = 0, changed = 0;
       const char* s = cl->text;
       while (*s && oi < MAXIN - 8) {
-        int rc, rr, n = ref(s, &rc, &rr);
+        int rc, rr, ac, ar, n = refabs(s, &rc, &rr, &ac, &ar);
         if (n) {
           if (axis == 'R') {
             if (rr == a)
@@ -77,7 +88,7 @@ static void fixrefs(struct grid* g, int axis, int a, int b) {
             else if (rc == b)
               rc = a, changed = 1;
           }
-          oi += snprintf(out + oi, MAXIN - oi, "%s%d", col(rc), rr + 1);
+          oi += emitref(out + oi, MAXIN - oi, rc, rr, ac, ar);
           s += n;
         } else {
           out[oi++] = *s++;
@@ -99,7 +110,7 @@ static void shiftrefs(struct grid* g, int axis, int pos, int dir) {
       int oi = 0, changed = 0;
       const char* s = cl->text;
       while (*s && oi < MAXIN - 8) {
-        int rc, rr, n = ref(s, &rc, &rr);
+        int rc, rr, ac, ar, n = refabs(s, &rc, &rr, &ac, &ar);
         if (n) {
           if (axis == 'R') {
             if (dir > 0 && rr >= pos)
@@ -112,7 +123,7 @@ static void shiftrefs(struct grid* g, int axis, int pos, int dir) {
             else if (dir < 0 && rc > pos)
               rc--, changed = 1;
           }
-          oi += snprintf(out + oi, MAXIN - oi, "%s%d", col(rc), rr + 1);
+          oi += emitref(out + oi, MAXIN - oi, rc, rr, ac, ar);
           s += n;
         } else {
           out[oi++] = *s++;
@@ -191,20 +202,34 @@ float number(struct parser* p) {
   return v;
 }
 
-int ref(const char* s, int* col, int* row) {
-  char* end;
+int refabs(const char* s, int* col, int* row, int* absc, int* absr) {
   const char* p = s;
+  *absc = *absr = 0;
+  if (*p == '$') {
+    *absc = 1;
+    p++;
+  }
   if (!isalpha(*p)) return 0;
   *col = toupper(*p++) - 'A' + 1;
   if (isalpha(*p)) *col = *col * 26 + (toupper(*p++) - 'A' + 1);
+  if (*p == '$') {
+    *absr = 1;
+    p++;
+  }
+  char* end;
   int n = strtol(p, &end, 10);
   if (n <= 0 || end == p) return 0;
   *row = n - 1, *col = *col - 1;
   return (int)(end - s);
 }
 
+int ref(const char* s, int* col, int* row) {
+  int ac, ar;
+  return refabs(s, col, row, &ac, &ar);
+}
+
 static float cellval(struct parser* p) {
-  int c, r, n = ref(p->p, &c, &r);
+  int c, r, ac, ar, n = refabs(p->p, &c, &r, &ac, &ar);
   if (!n) return NAN;
   p->p += n;
   struct cell* cl = cell(p->g, c, r);
@@ -626,6 +651,186 @@ void movecmd(struct grid* g) {
   }
 }
 
+static void replicatecell(struct grid* g, int sc, int sr, int dc, int dr) {
+  struct cell* src = cell(g, sc, sr);
+  struct cell* dst = cell(g, dc, dr);
+  if (!src || !dst) return;
+  if (src->type == EMPTY) {
+    *dst = (struct cell){0};
+    return;
+  }
+  *dst = *src;
+  if (src->type != FORMULA) return;
+
+  int dcol = dc - sc, drow = dr - sr;
+  char out[MAXIN] = {0};
+  int oi = 0;
+  const char* s = src->text;
+  while (*s && oi < MAXIN - 8) {
+    int rc, rr, ac, ar, n = refabs(s, &rc, &rr, &ac, &ar);
+    if (n) {
+      if (!ac) rc += dcol;
+      if (!ar) rr += drow;
+      oi += emitref(out + oi, MAXIN - oi, rc, rr, ac, ar);
+      s += n;
+    } else {
+      out[oi++] = *s++;
+    }
+  }
+  out[oi] = '\0';
+  strncpy(dst->text, out, MAXIN - 1);
+}
+
+// Helper: format a range string into buf (uses static col() buffer carefully)
+static void fmtrange(char* buf, int sz, int c1, int r1, int c2, int r2) {
+  if (c1 == c2 && r1 == r2) {
+    snprintf(buf, sz, "%s%d", col(c1), r1 + 1);
+  } else {
+    char a[8];
+    snprintf(a, sizeof(a), "%s%d", col(c1), r1 + 1);
+    snprintf(buf, sz, "%s...%s%d", a, col(c2), r2 + 1);
+  }
+}
+
+// Select a range: anchor is fixed, cursor moves to define other corner.
+// Both cursor keys and typed input work. Returns 1 on Enter, 0 on Esc.
+static int selectrange(struct grid* g, const char* prompt, int ac, int ar, int* c1, int* r1,
+                       int* c2, int* r2) {
+  char buf[MAXIN] = {0};
+  int n = 0, typed = 0;
+  g->cc = ac;
+  g->cr = ar;
+  for (;;) {
+    char rng[32];
+    if (typed) {
+      snprintf(rng, sizeof(rng), "%s_", buf);
+    } else {
+      fmtrange(rng, sizeof(rng), ac < g->cc ? ac : g->cc, ar < g->cr ? ar : g->cr,
+               ac > g->cc ? ac : g->cc, ar > g->cr ? ar : g->cr);
+    }
+    draw(g, "REPL", "");
+    mvprintw(1, 0, "%s %s", prompt, rng);
+    clrtoeol();
+    refresh();
+    int ch = getch();
+    if (ch == 27) return 0;
+    if (ch == 10 || ch == 13 || ch == KEY_ENTER) {
+      if (typed) {
+        const char* p = buf;
+        int k = ref(p, c1, r1);
+        if (!k) return 0;
+        p += k;
+        *c2 = *c1, *r2 = *r1;
+        if (p[0] == '.' && p[1] == '.' && p[2] == '.') {
+          p += 3;
+          if (!ref(p, c2, r2)) return 0;
+        }
+      } else {
+        *c1 = ac < g->cc ? ac : g->cc;
+        *r1 = ar < g->cr ? ar : g->cr;
+        *c2 = ac > g->cc ? ac : g->cc;
+        *r2 = ar > g->cr ? ar : g->cr;
+      }
+      if (*c1 > *c2) {
+        int t = *c1;
+        *c1 = *c2;
+        *c2 = t;
+      }
+      if (*r1 > *r2) {
+        int t = *r1;
+        *r1 = *r2;
+        *r2 = t;
+      }
+      return 1;
+    } else if (ch == KEY_UP || ch == KEY_DOWN || ch == KEY_LEFT || ch == KEY_RIGHT) {
+      typed = 0;
+      buf[0] = '\0';
+      n = 0;
+      if (ch == KEY_UP && g->cr > 0)
+        g->cr--;
+      else if (ch == KEY_DOWN && g->cr < NROW - 1)
+        g->cr++;
+      else if (ch == KEY_LEFT && g->cc > 0)
+        g->cc--;
+      else if (ch == KEY_RIGHT && g->cc < NCOL - 1)
+        g->cc++;
+    } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+      typed = 1;
+      if (n > 0) buf[--n] = '\0';
+    } else if (n < MAXIN - 1 && ch >= 32 && ch < 127) {
+      typed = 1;
+      buf[n++] = toupper(ch);
+      buf[n] = '\0';
+    }
+  }
+}
+
+void replcmd(struct grid* g) {
+  int sc1, sr1, sc2, sr2;
+  int origc = g->cc, origr = g->cr;
+
+  // Phase 1: select source range (anchor = current cell)
+  if (!selectrange(g, "Source:", origc, origr, &sc1, &sr1, &sc2, &sr2)) return;
+
+  // Phase 2: pick target top-left corner, target size = source size
+  int sw = sc2 - sc1 + 1, sh = sr2 - sr1 + 1;
+  char srcstr[32];
+  fmtrange(srcstr, sizeof(srcstr), sc1, sr1, sc2, sr2);
+  g->cc = sc1, g->cr = sr1;  // start target selection from source position
+  char buf[MAXIN] = {0};
+  int n = 0, typed = 0;
+  for (;;) {
+    char tgt[32];
+    int tc = typed ? -1 : g->cc, tr = typed ? -1 : g->cr;
+    if (typed) {
+      snprintf(tgt, sizeof(tgt), "%s_", buf);
+    } else {
+      fmtrange(tgt, sizeof(tgt), tc, tr, tc + sw - 1, tr + sh - 1);
+    }
+    draw(g, "REPL", "");
+    mvprintw(1, 0, "%s to: %s", srcstr, tgt);
+    clrtoeol();
+    refresh();
+    int ch = getch();
+    if (ch == 27) return;
+    if (ch == 10 || ch == 13 || ch == KEY_ENTER) {
+      int tc1, tr1;
+      if (typed) {
+        int dummy;
+        int k = ref(buf, &tc1, &tr1);
+        if (!k) return;
+      } else {
+        tc1 = g->cc;
+        tr1 = g->cr;
+      }
+      for (int r = 0; r < sh; r++)
+        for (int c = 0; c < sw; c++) replicatecell(g, sc1 + c, sr1 + r, tc1 + c, tr1 + r);
+      recalc(g);
+      g->dirty = 1;
+      return;
+    } else if (ch == KEY_UP || ch == KEY_DOWN || ch == KEY_LEFT || ch == KEY_RIGHT) {
+      typed = 0;
+      buf[0] = '\0';
+      n = 0;
+      if (ch == KEY_UP && g->cr > 0)
+        g->cr--;
+      else if (ch == KEY_DOWN && g->cr < NROW - 1)
+        g->cr++;
+      else if (ch == KEY_LEFT && g->cc > 0)
+        g->cc--;
+      else if (ch == KEY_RIGHT && g->cc < NCOL - 1)
+        g->cc++;
+    } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+      typed = 1;
+      if (n > 0) buf[--n] = '\0';
+    } else if (n < MAXIN - 1 && ch >= 32 && ch < 127) {
+      typed = 1;
+      buf[n++] = toupper(ch);
+      buf[n] = '\0';
+    }
+  }
+}
+
 //
 //  /B                   Blank current cell value (keep formatting)
 //  /C                   Clear entire spreadsheet (keep formatting)
@@ -709,7 +914,7 @@ int command(struct grid* g) {
   } else if (ch == 'M') {
     movecmd(g);
   } else if (ch == 'R') {
-    //
+    replcmd(g);
   } else if (ch == 'T') {
     mvprintw(1, 0, "Lock (V)ertical, (H)orizontal, (B)oth, or (N)one?"), clrtoeol();
     ch = toupper(getch());
@@ -1403,6 +1608,155 @@ void test_insert_delete(void) {
   assert(g.cells[1][2].val == 42.0f);
 }
 
+void test_replicate(void) {
+  struct grid g = {0};
+
+  // Replicate a number: plain copy
+  setcell(&g, 0, 0, "42");
+  replicatecell(&g, 0, 0, 1, 0);
+  recalc(&g);
+  assert(g.cells[1][0].type == NUM);
+  assert(g.cells[1][0].val == 42.0f);
+
+  // Replicate a label: plain copy
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "hello");
+  replicatecell(&g, 0, 0, 1, 0);
+  assert(g.cells[1][0].type == LABEL);
+  assert(strcmp(g.cells[1][0].text, "hello") == 0);
+
+  // Replicate formula down: refs shift by row delta
+  // A1=10, A2=20, B1=+A1 → replicate B1 to B2 → B2=+A2
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 0, 1, "20");
+  setcell(&g, 1, 0, "+A1");
+  replicatecell(&g, 1, 0, 1, 1);  // B1 -> B2
+  recalc(&g);
+  assert(strcmp(g.cells[1][1].text, "+A2") == 0);
+  assert(g.cells[1][1].val == 20.0f);
+
+  // Replicate formula right: refs shift by col delta
+  // A1=10, B1=20, A2=+A1 → replicate A2 to B2 → B2=+B1
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 1, 0, "20");
+  setcell(&g, 0, 1, "+A1");
+  replicatecell(&g, 0, 1, 1, 1);  // A2 -> B2
+  recalc(&g);
+  assert(strcmp(g.cells[1][1].text, "+B1") == 0);
+  assert(g.cells[1][1].val == 20.0f);
+
+  // Absolute ref: $A$1 stays fixed
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 1, 0, "+$A$1");
+  replicatecell(&g, 1, 0, 1, 1);  // B1 -> B2
+  recalc(&g);
+  assert(strcmp(g.cells[1][1].text, "+$A$1") == 0);
+  assert(g.cells[1][1].val == 10.0f);
+
+  // Mixed: $A1 → col fixed, row shifts
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 0, 1, "20");
+  setcell(&g, 1, 0, "+$A1");
+  replicatecell(&g, 1, 0, 1, 1);  // B1 -> B2
+  recalc(&g);
+  assert(strcmp(g.cells[1][1].text, "+$A2") == 0);
+  assert(g.cells[1][1].val == 20.0f);
+
+  // Mixed: A$1 → row fixed, col shifts
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 1, 0, "20");
+  setcell(&g, 0, 1, "+A$1");
+  replicatecell(&g, 0, 1, 1, 1);  // A2 -> B2
+  recalc(&g);
+  assert(strcmp(g.cells[1][1].text, "+B$1") == 0);
+  assert(g.cells[1][1].val == 20.0f);
+
+  // Replicate to range: B1=+A1, replicate to B2...B4
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "1");
+  setcell(&g, 0, 1, "2");
+  setcell(&g, 0, 2, "3");
+  setcell(&g, 0, 3, "4");
+  setcell(&g, 1, 0, "+A1");
+  for (int r = 1; r <= 3; r++) replicatecell(&g, 1, 0, 1, r);
+  recalc(&g);
+  assert(strcmp(g.cells[1][1].text, "+A2") == 0);
+  assert(g.cells[1][1].val == 2.0f);
+  assert(strcmp(g.cells[1][2].text, "+A3") == 0);
+  assert(g.cells[1][2].val == 3.0f);
+  assert(strcmp(g.cells[1][3].text, "+A4") == 0);
+  assert(g.cells[1][3].val == 4.0f);
+
+  // SUM range shifts: B1=+@SUM(A1...A3), replicate to C1 → +@SUM(B1...B3)
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "1");
+  setcell(&g, 0, 1, "2");
+  setcell(&g, 0, 2, "3");
+  setcell(&g, 1, 0, "+@SUM(A1...A3)");
+  assert(g.cells[1][0].val == 6.0f);
+  replicatecell(&g, 1, 0, 2, 0);  // B1 -> C1
+  recalc(&g);
+  assert(strcmp(g.cells[2][0].text, "+@SUM(B1...B3)") == 0);
+
+  // Replicate empty cell clears target
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 1, 0, "999");
+  replicatecell(&g, 0, 0, 1, 0);  // A1 (empty) -> B1
+  assert(g.cells[1][0].type == EMPTY);
+
+  // $ refs survive in formula evaluation
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "7");
+  setcell(&g, 1, 0, "+$A$1*2");
+  recalc(&g);
+  assert(g.cells[1][0].val == 14.0f);
+
+  // Range-to-range: replicate A1...A3 to B1...B3
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 0, 1, "20");
+  setcell(&g, 0, 2, "+A1+A2");
+  assert(g.cells[0][2].val == 30.0f);
+  // Simulate range replication: source A1...A3 -> target B1...B3
+  {
+    int sc1 = 0, sr1 = 0, sc2 = 0, sr2 = 2;
+    int tc1 = 1, tr1 = 0, tc2 = 1, tr2 = 2;
+    int sw = sc2 - sc1 + 1, sh = sr2 - sr1 + 1;
+    for (int r = tr1; r <= tr2; r++)
+      for (int c = tc1; c <= tc2; c++)
+        replicatecell(&g, sc1 + (c - tc1) % sw, sr1 + (r - tr1) % sh, c, r);
+    recalc(&g);
+  }
+  assert(g.cells[1][0].val == 10.0f);
+  assert(g.cells[1][1].val == 20.0f);
+  // B3 = +B1+B2 (shifted from +A1+A2)
+  assert(strcmp(g.cells[1][2].text, "+B1+B2") == 0);
+  assert(g.cells[1][2].val == 30.0f);
+
+  // Range-to-range tiling: replicate A1...A2 to B1...B4 (tiles 2 rows into 4)
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "1");
+  setcell(&g, 0, 1, "2");
+  {
+    int sc1 = 0, sr1 = 0, sc2 = 0, sr2 = 1;
+    int tc1 = 1, tr1 = 0, tc2 = 1, tr2 = 3;
+    int sw = sc2 - sc1 + 1, sh = sr2 - sr1 + 1;
+    for (int r = tr1; r <= tr2; r++)
+      for (int c = tc1; c <= tc2; c++)
+        replicatecell(&g, sc1 + (c - tc1) % sw, sr1 + (r - tr1) % sh, c, r);
+    recalc(&g);
+  }
+  assert(g.cells[1][0].val == 1.0f);
+  assert(g.cells[1][1].val == 2.0f);
+  assert(g.cells[1][2].val == 1.0f);  // tiled
+  assert(g.cells[1][3].val == 2.0f);  // tiled
+}
+
 int main(void) {
   test_expr();
   test_recalc();
@@ -1414,6 +1768,7 @@ int main(void) {
   test_swap();
   test_fixrefs();
   test_insert_delete();
+  test_replicate();
   return 0;
 }
 #endif
