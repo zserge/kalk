@@ -1,0 +1,9 @@
+Item,Qty,Price,Total
+Widget A,10,4.99,+B2*C2
+Widget B,25,2.50,+B3*C3
+Widget C,7,12.00,+B4*C4
+"Gadget, Deluxe",3,29.99,+B5*C5
+,,,
+Subtotal,,,+@SUM(D2...D5)
+"Tax, 19%",,,+D7*0.19
+Total,,,+D7+D8
