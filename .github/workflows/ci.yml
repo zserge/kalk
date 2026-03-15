@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libncurses-dev
+
+      - name: Build
+        run: make kalk
+
+      - name: Test
+        run: make test
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libncurses-dev
+
+      - name: Build
+        run: make kalk
+
+      - name: Create tarball
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          mkdir -p kalk-${VERSION}
+          cp kalk.c Makefile kalk.1 LICENSE README.md kalk-${VERSION}/
+          tar czf kalk-${VERSION}.tar.gz kalk-${VERSION}
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: kalk-*.tar.gz
+          generate_release_notes: true
