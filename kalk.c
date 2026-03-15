@@ -21,7 +21,7 @@ struct cell {
 struct grid {
   struct cell cells[NCOL][NROW];
   int cc, cr, vc, vr, tc, tr, fmt;
-	const char *filename;
+  const char* filename;
 };
 
 struct parser {
@@ -217,17 +217,122 @@ float expr(struct parser* p) {
   return l;
 }
 
-int csvload(struct grid *g, const char *filename) {
-	FILE *f = fopen(filename, "r");
-	if (!f) return -1;
-	char line[BUFSIZ];
-	
-	fclose(f);
-	return 0;
+static int csvfield(FILE* f, char* buf, int bufsz, int* eol, int* eof) {
+  int c, n = 0, quoted = 0;
+  *eol = *eof = 0;
+  buf[0] = '\0';
+
+  c = fgetc(f);
+  if (c == EOF) {
+    *eof = 1;
+    return 0;
+  }
+
+  if (c == '"') {
+    quoted = 1;
+    for (;;) {
+      c = fgetc(f);
+      if (c == EOF) {
+        *eof = 1;
+        break;
+      }
+      if (c == '"') {
+        c = fgetc(f);
+        if (c == '"') {
+          if (n < bufsz - 1) buf[n++] = '"';
+        } else {
+          if (c == '\r') c = fgetc(f);
+          if (c == '\n' || c == EOF) {
+            *eol = 1;
+            if (c == EOF) *eof = 1;
+          }
+          break;
+        }
+      } else {
+        if (n < bufsz - 1) buf[n++] = c;
+      }
+    }
+  } else {
+    for (;;) {
+      if (c == ',' || c == '\n' || c == EOF) {
+        if (c == '\n' || c == EOF) {
+          *eol = 1;
+          if (c == EOF) *eof = 1;
+        }
+        break;
+      }
+      if (c == '\r') {
+        c = fgetc(f);
+        continue;
+      }
+      if (n < bufsz - 1) buf[n++] = c;
+      c = fgetc(f);
+    }
+  }
+  buf[n] = '\0';
+  return 1;
 }
 
-int csvsave(struct grid *g, const char *filename) {
-	return -1;
+int csvload(struct grid* g, const char* filename) {
+  FILE* f = fopen(filename, "r");
+  if (!f) return -1;
+  char buf[MAXIN];
+  int row = 0, col = 0, eol, eof;
+
+  while (csvfield(f, buf, sizeof(buf), &eol, &eof)) {
+    if (buf[0] && row < NROW && col < NCOL) setcell(g, col, row, buf);
+    if (eol) {
+      row++, col = 0;
+    } else
+      col++;
+    if (eof) break;
+  }
+  fclose(f);
+  return 0;
+}
+
+static int csvneedsquote(const char* s) {
+  for (; *s; s++)
+    if (*s == ',' || *s == '"' || *s == '\n' || *s == '\r') return 1;
+  return 0;
+}
+
+static void csvwritefield(FILE* f, const char* s) {
+  if (csvneedsquote(s)) {
+    fputc('"', f);
+    for (; *s; s++) {
+      if (*s == '"') fputc('"', f);
+      fputc(*s, f);
+    }
+    fputc('"', f);
+  } else {
+    fputs(s, f);
+  }
+}
+
+int csvsave(struct grid* g, const char* filename) {
+  FILE* f = fopen(filename, "w");
+  if (!f) return -1;
+
+  int maxr = -1, maxc = -1;
+  for (int r = 0; r < NROW; r++)
+    for (int c = 0; c < NCOL; c++)
+      if (g->cells[c][r].type != EMPTY) {
+        if (r > maxr) maxr = r;
+        if (c > maxc) maxc = c;
+      }
+
+  for (int r = 0; r <= maxr; r++) {
+    for (int c = 0; c <= maxc; c++) {
+      if (c > 0) fputc(',', f);
+      struct cell* cl = &g->cells[c][r];
+      if (cl->type == EMPTY) continue;
+      csvwritefield(f, cl->text);
+    }
+    fputc('\n', f);
+  }
+  fclose(f);
+  return 0;
 }
 
 static int vcols(void) { return (COLS - GW) / CW > 0 ? (COLS - GW) / CW : 1; }
@@ -298,20 +403,21 @@ static void draw(struct grid* g, const char* mode, const char* buf) {
         snprintf(fb, CW + 1, "%*s", CW, "ERROR");
       } else {
         char t[MAXIN] = {0}, fmt = cl->fmt;
-				if (!fmt || fmt == 'D') fmt = g->fmt; // use default format
-				// L R I G D $ % *
+        if (!fmt || fmt == 'D')
+          fmt = g->fmt;  // use default format
+                         // L R I G D $ % *
         if (fmt == '$') {
           snprintf(t, sizeof(t), "%.2f", cl->val);
-				} else if (fmt == '%') {
+        } else if (fmt == '%') {
           snprintf(t, sizeof(t), "%.2f%%", cl->val * 100);
-				} else if (fmt == '*') {
-					for (int i = 0; i < CW && i < cl->val; i++) t[i] = '*';
-					fmt = 'L';
-				} else if (fmt == 'I' || (cl->val == (long)cl->val && fabs(cl->val) < 1e9)) {
+        } else if (fmt == '*') {
+          for (int i = 0; i < CW && i < cl->val; i++) t[i] = '*';
+          fmt = 'L';
+        } else if (fmt == 'I' || (cl->val == (long)cl->val && fabs(cl->val) < 1e9)) {
           snprintf(t, sizeof(t), "%ld", (long)cl->val);
-				} else {
+        } else {
           snprintf(t, sizeof(t), "%g", cl->val);
-				}
+        }
         snprintf(fb, CW + 1, fmt == 'L' ? "%-*s" : "%*s", CW, t);
       }
 
@@ -377,37 +483,37 @@ int command(struct grid* g) {
       for (int r = 0; r < NROW; r++) g->cells[g->cc][r] = (struct cell){0};
     }
   } else if (ch == 'F') {
-		mvprintw(1, 0, "Format: L R I G D $ %% *"), clrtoeol();
+    mvprintw(1, 0, "Format: L R I G D $ %% *"), clrtoeol();
     ch = toupper(getch());
     struct cell* cl = cell(g, g->cc, g->cr);
-		if (strchr("LRIGD$%*", ch)) cl->fmt = ch;
+    if (strchr("LRIGD$%*", ch)) cl->fmt = ch;
   } else if (ch == 'G') {
     mvprintw(1, 0, "Global: (C)ol width or (F)mt?"), clrtoeol();
-		ch = toupper(getch());
-		if (ch == 'C') {
-			mvprintw(1, 0, "New column width (4-20)?"), clrtoeol();
-			char buf[16] = {0};
-			int n = 0;
-			for (;;) {
-				mvprintw(1, 30, "%s_", buf);
-				int ch = getch();
-				if (ch == 27) break;
-				if (ch == 10 || ch == 13 || ch == KEY_ENTER) {
-					int w = strtol(buf, NULL, 10);
-					if (w >= 4 && w <= 20) CW = w;
-					break;
-				} else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-					if (n > 0) buf[--n] = '\0';
-				} else if (isdigit(ch) && n < sizeof(buf) - 1) {
-					buf[n++] = ch;
-					buf[n] = '\0';
-				}
-			}
-		} else if (ch == 'F') {
-			mvprintw(1, 0, "Format: L R I G D $ %% *"), clrtoeol();
-			ch = toupper(getch());
-			if (strchr("LRIGD$%*", ch)) g->fmt = ch;
-		}
+    ch = toupper(getch());
+    if (ch == 'C') {
+      mvprintw(1, 0, "New column width (4-20)?"), clrtoeol();
+      char buf[16] = {0};
+      int n = 0;
+      for (;;) {
+        mvprintw(1, 30, "%s_", buf);
+        int ch = getch();
+        if (ch == 27) break;
+        if (ch == 10 || ch == 13 || ch == KEY_ENTER) {
+          int w = strtol(buf, NULL, 10);
+          if (w >= 4 && w <= 20) CW = w;
+          break;
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+          if (n > 0) buf[--n] = '\0';
+        } else if (isdigit(ch) && n < sizeof(buf) - 1) {
+          buf[n++] = ch;
+          buf[n] = '\0';
+        }
+      }
+    } else if (ch == 'F') {
+      mvprintw(1, 0, "Format: L R I G D $ %% *"), clrtoeol();
+      ch = toupper(getch());
+      if (strchr("LRIGD$%*", ch)) g->fmt = ch;
+    }
   } else if (ch == 'M') {
     //
   } else if (ch == 'R') {
@@ -529,19 +635,19 @@ void loop(struct grid* g) {
 }
 
 #ifndef TEST
-int main(int argc, char *argv[]) {
-	static struct grid g = {0}; // might be too large for stack
-	if (argc == 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
-		fprintf(stderr, "Usage: %s sheet.csv\n", argv[0]);
-		exit(1);
-	}
-	if (argc > 1) {
-		if (csvload(&g, argv[1]) < 0) {
-			perror("Failed to load CSV file");
-			exit(1);
-		}
-		g.filename = argv[1];
-	}
+int main(int argc, char* argv[]) {
+  static struct grid g = {0};  // might be too large for stack
+  if (argc == 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+    fprintf(stderr, "Usage: %s sheet.csv\n", argv[0]);
+    exit(1);
+  }
+  if (argc > 1) {
+    if (csvload(&g, argv[1]) < 0) {
+      perror("Failed to load CSV file");
+      exit(1);
+    }
+    g.filename = argv[1];
+  }
   initscr();
   raw();
   keypad(stdscr, TRUE);
@@ -635,11 +741,114 @@ void test_col(void) {
   assert(strcmp(col(52), "BA") == 0);
 }
 
+void test_csv_load(void) {
+  struct grid g = {0};
+
+  // basic CSV: numbers, labels, formulas
+  {
+    FILE* f = fopen("/tmp/test_kalk_basic.csv", "w");
+    fprintf(f, "10,20,30\n");
+    fprintf(f, "hello,world,+A1+B1\n");
+    fclose(f);
+    assert(csvload(&g, "/tmp/test_kalk_basic.csv") == 0);
+    assert(g.cells[0][0].type == NUM && g.cells[0][0].val == 10.0f);
+    assert(g.cells[1][0].type == NUM && g.cells[1][0].val == 20.0f);
+    assert(g.cells[2][0].type == NUM && g.cells[2][0].val == 30.0f);
+    assert(g.cells[0][1].type == LABEL);
+    assert(strcmp(g.cells[0][1].text, "hello") == 0);
+    assert(g.cells[2][1].type == FORMULA);
+    assert(g.cells[2][1].val == 30.0f);  // A1+B1 = 10+20
+  }
+
+  // quoted fields: embedded commas and quotes
+  {
+    memset(&g, 0, sizeof(g));
+    FILE* f = fopen("/tmp/test_kalk_quoted.csv", "w");
+    fprintf(f, "\"has,comma\",\"has\"\"quote\",plain\n");
+    fclose(f);
+    assert(csvload(&g, "/tmp/test_kalk_quoted.csv") == 0);
+    assert(strcmp(g.cells[0][0].text, "has,comma") == 0);
+    assert(strcmp(g.cells[1][0].text, "has\"quote") == 0);
+    assert(strcmp(g.cells[2][0].text, "plain") == 0);
+  }
+
+  // CRLF line endings (Windows/Excel)
+  {
+    memset(&g, 0, sizeof(g));
+    FILE* f = fopen("/tmp/test_kalk_crlf.csv", "wb");
+    fprintf(f, "1,2\r\n3,4\r\n");
+    fclose(f);
+    assert(csvload(&g, "/tmp/test_kalk_crlf.csv") == 0);
+    assert(g.cells[0][0].val == 1.0f);
+    assert(g.cells[1][0].val == 2.0f);
+    assert(g.cells[0][1].val == 3.0f);
+    assert(g.cells[1][1].val == 4.0f);
+  }
+
+  // empty cells
+  {
+    memset(&g, 0, sizeof(g));
+    FILE* f = fopen("/tmp/test_kalk_empty.csv", "w");
+    fprintf(f, "1,,3\n,5,\n");
+    fclose(f);
+    assert(csvload(&g, "/tmp/test_kalk_empty.csv") == 0);
+    assert(g.cells[0][0].val == 1.0f);
+    assert(g.cells[1][0].type == EMPTY);
+    assert(g.cells[2][0].val == 3.0f);
+    assert(g.cells[0][1].type == EMPTY);
+    assert(g.cells[1][1].val == 5.0f);
+  }
+
+  // non-existent file
+  assert(csvload(&g, "/tmp/test_kalk_nonexistent_42.csv") == -1);
+}
+
+void test_csv_save(void) {
+  struct grid g = {0};
+
+  setcell(&g, 0, 0, "100");
+  setcell(&g, 1, 0, "200");
+  setcell(&g, 2, 0, "+A1+B1");
+  setcell(&g, 0, 1, "hello");
+  setcell(&g, 1, 1, "has,comma");
+
+  assert(csvsave(&g, "/tmp/test_kalk_save.csv") == 0);
+
+  // read back and verify
+  memset(&g, 0, sizeof(g));
+  assert(csvload(&g, "/tmp/test_kalk_save.csv") == 0);
+  assert(g.cells[0][0].val == 100.0f);
+  assert(g.cells[1][0].val == 200.0f);
+  assert(g.cells[2][0].type == FORMULA);
+  assert(g.cells[2][0].val == 300.0f);
+  assert(strcmp(g.cells[0][1].text, "hello") == 0);
+  assert(strcmp(g.cells[1][1].text, "has,comma") == 0);
+}
+
+void test_csv_roundtrip(void) {
+  struct grid g = {0};
+
+  // field with embedded quote
+  setcell(&g, 0, 0, "say \"hello\"");
+  setcell(&g, 1, 0, "normal");
+  setcell(&g, 0, 1, "42.5");
+
+  assert(csvsave(&g, "/tmp/test_kalk_rt.csv") == 0);
+  memset(&g, 0, sizeof(g));
+  assert(csvload(&g, "/tmp/test_kalk_rt.csv") == 0);
+  assert(strcmp(g.cells[0][0].text, "say \"hello\"") == 0);
+  assert(strcmp(g.cells[1][0].text, "normal") == 0);
+  assert(g.cells[0][1].val == 42.5f);
+}
+
 int main(void) {
   test_expr();
   test_recalc();
   test_ref();
   test_col();
+  test_csv_load();
+  test_csv_save();
+  test_csv_roundtrip();
   return 0;
 }
 #endif
