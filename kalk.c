@@ -20,7 +20,7 @@ struct cell {
 
 struct grid {
   struct cell cells[NCOL][NROW];
-  int cc, cr, vc, vr, tc, tr, fmt;
+  int cc, cr, vc, vr, tc, tr, fmt, dirty;
   const char* filename;
 };
 
@@ -61,6 +61,7 @@ void setcell(struct grid* g, int c, int r, const char* input) {
   }
 
   strncpy(cl->text, input, MAXIN - 1);
+  g->dirty = 1;
 
   if (input[0] == '+' || input[0] == '-' || input[0] == '(' || input[0] == '@') {
     cl->type = FORMULA;
@@ -439,17 +440,19 @@ static void draw(struct grid* g, const char* mode, const char* buf) {
 //  /GF(L/R/I/G/D/$/%/*) Set default column format
 //  /M                   Move cell (cut/paste)
 //  /R                   Replicate cell
+//  /SL                  Load CSV file
+//  /SS                  Save CSV file
+//  /SQ                  Save and quit
 //  /T(V/H/B/N)          Lock rows/columns
-//  /Q                   Quit
+//  /Q                   Quit (prompts if unsaved)
 //
 int command(struct grid* g) {
   draw(g, "CMD", "");
-  mvprintw(1, 0, "Command: B C F D I G M R T Q"), clrtoeol();
+  mvprintw(1, 0, "Command: B C F D I G M R S T Q"), clrtoeol();
   refresh();
   int ch = toupper(getch());
   if (ch == 'B') {  // blank current cell
-    struct cell* cl = cell(g, g->cc, g->cr);
-    if (cl) *cl = (struct cell){0};
+    setcell(g, g->cc, g->cr, "");
     recalc(g);
   } else if (ch == 'C') {  // clear sheet
     mvprintw(1, 0, "Clear entire sheet? (y/N)"), clrtoeol();
@@ -457,6 +460,7 @@ int command(struct grid* g) {
     if (ch == 'y' || ch == 'Y') {
       for (int r = 0; r < NROW; r++)
         for (int c = 0; c < NCOL; c++) g->cells[c][r] = (struct cell){0};
+      g->dirty = 1;
     }
   } else if (ch == 'D') {  // delete row/column
     mvprintw(1, 0, "Delete (R)ow or (C)olumn?"), clrtoeol();
@@ -465,10 +469,12 @@ int command(struct grid* g) {
       for (int c = 0; c < NCOL; c++)
         for (int r = g->cr; r < NROW - 1; r++) g->cells[c][r] = g->cells[c][r + 1];
       for (int c = 0; c < NCOL; c++) g->cells[c][NROW - 1] = (struct cell){0};
+      g->dirty = 1;
     } else if (ch == 'C') {
       for (int r = 0; r < NROW; r++)
         for (int c = g->cc; c < NCOL - 1; c++) g->cells[c][r] = g->cells[c + 1][r];
       for (int r = 0; r < NROW; r++) g->cells[NCOL - 1][r] = (struct cell){0};
+      g->dirty = 1;
     }
   } else if (ch == 'I') {
     mvprintw(1, 0, "Insert (R)ow or (C)olumn?"), clrtoeol();
@@ -477,10 +483,12 @@ int command(struct grid* g) {
       for (int c = 0; c < NCOL; c++)
         for (int r = NROW - 1; r > g->cr; r--) g->cells[c][r] = g->cells[c][r - 1];
       for (int c = 0; c < NCOL; c++) g->cells[c][g->cr] = (struct cell){0};
+      g->dirty = 1;
     } else if (ch == 'C') {
       for (int r = 0; r < NROW; r++)
         for (int c = NCOL - 1; c > g->cc; c--) g->cells[c][r] = g->cells[c - 1][r];
       for (int r = 0; r < NROW; r++) g->cells[g->cc][r] = (struct cell){0};
+      g->dirty = 1;
     }
   } else if (ch == 'F') {
     mvprintw(1, 0, "Format: L R I G D $ %% *"), clrtoeol();
@@ -530,8 +538,88 @@ int command(struct grid* g) {
     } else if (ch == 'N') {
       g->tc = g->tr = -1;
     }
+  } else if (ch == 'S') {
+    mvprintw(1, 0, "Storage: (L)oad, (S)ave, or save & (Q)uit?"), clrtoeol();
+    ch = toupper(getch());
+    if (ch == 'L') {
+      // prompt for filename
+      mvprintw(1, 0, "Load file: "), clrtoeol();
+      char fbuf[256] = {0};
+      int fn = 0;
+      if (g->filename) {
+        strncpy(fbuf, g->filename, sizeof(fbuf) - 1);
+        fn = strlen(fbuf);
+      }
+      for (;;) {
+        mvprintw(1, 11, "%s_  ", fbuf);
+        int ch = getch();
+        if (ch == 27) break;
+        if (ch == 10 || ch == 13 || ch == KEY_ENTER) {
+          if (fn > 0) {
+            for (int r = 0; r < NROW; r++)
+              for (int c = 0; c < NCOL; c++) g->cells[c][r] = (struct cell){0};
+            if (csvload(g, fbuf) == 0) {
+              g->filename = strdup(fbuf);
+              g->dirty = 0;
+            } else {
+              mvprintw(1, 0, "Failed to load: %s. Press any key.", fbuf), clrtoeol();
+              getch();
+            }
+          }
+          break;
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+          if (fn > 0) fbuf[--fn] = '\0';
+        } else if (fn < (int)sizeof(fbuf) - 1 && ch >= 32) {
+          fbuf[fn++] = ch;
+          fbuf[fn] = '\0';
+        }
+      }
+    } else if (ch == 'S' || ch == 'Q') {
+      int quit = (ch == 'Q');
+      const char* fn = g->filename;
+      if (!fn) {
+        // prompt for filename
+        mvprintw(1, 0, "Save as: "), clrtoeol();
+        static char sbuf[256] = {0};
+        int sn = 0;
+        sbuf[0] = '\0';
+        for (;;) {
+          mvprintw(1, 9, "%s_  ", sbuf);
+          int ch = getch();
+          if (ch == 27) {
+            fn = NULL;
+            break;
+          }
+          if (ch == 10 || ch == 13 || ch == KEY_ENTER) {
+            fn = (sn > 0) ? sbuf : NULL;
+            break;
+          } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (sn > 0) sbuf[--sn] = '\0';
+          } else if (sn < (int)sizeof(sbuf) - 1 && ch >= 32) {
+            sbuf[sn++] = ch;
+            sbuf[sn] = '\0';
+          }
+        }
+      }
+      if (fn) {
+        if (csvsave(g, fn) == 0) {
+          g->filename = fn;
+          g->dirty = 0;
+          if (quit) return 1;
+        } else {
+          mvprintw(1, 0, "Failed to save: %s. Press any key.", fn), clrtoeol();
+          getch();
+        }
+      }
+    }
   } else if (ch == 'Q') {
-    return 1;
+    if (g->dirty) {
+      mvprintw(1, 0, "Unsaved changes. Quit anyway? (y/N)"), clrtoeol();
+      ch = getch();
+      if (ch == 'y' || ch == 'Y') return 1;
+    } else {
+      return 1;
+    }
   }
   return 0;
 }
