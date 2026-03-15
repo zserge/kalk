@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <ctype.h>
 #include <math.h>
@@ -686,7 +687,7 @@ static void fmtrange(char* buf, int sz, int c1, int r1, int c2, int r2) {
   if (c1 == c2 && r1 == r2) {
     snprintf(buf, sz, "%s%d", col(c1), r1 + 1);
   } else {
-    char a[8];
+    char a[16];
     snprintf(a, sizeof(a), "%s%d", col(c1), r1 + 1);
     snprintf(buf, sz, "%s...%s%d", a, col(c2), r2 + 1);
   }
@@ -701,7 +702,7 @@ static int selectrange(struct grid* g, const char* prompt, int ac, int ar, int* 
   g->cc = ac;
   g->cr = ar;
   for (;;) {
-    char rng[32];
+    char rng[MAXIN + 4];
     if (typed) {
       snprintf(rng, sizeof(rng), "%s_", buf);
     } else {
@@ -780,7 +781,7 @@ void replcmd(struct grid* g) {
   char buf[MAXIN] = {0};
   int n = 0, typed = 0;
   for (;;) {
-    char tgt[32];
+    char tgt[MAXIN + 4];
     int tc = typed ? -1 : g->cc, tr = typed ? -1 : g->cr;
     if (typed) {
       snprintf(tgt, sizeof(tgt), "%s_", buf);
