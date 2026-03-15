@@ -30,6 +30,8 @@ struct parser {
 };
 
 float expr(struct parser* p);
+int ref(const char* s, int* col, int* row);
+static char* col(int c);
 
 struct cell* cell(struct grid* g, int c, int r) {
   return (c >= 0 && c < NCOL && r >= 0 && r < NROW) ? &g->cells[c][r] : NULL;
@@ -49,6 +51,108 @@ void recalc(struct grid* g) {
       }
     if (!changed) break;
   }
+}
+
+// Rewrite cell references in all formulas after swapping two adjacent rows or columns.
+// axis='R': rows a and b swapped. axis='C': columns a and b swapped.
+static void fixrefs(struct grid* g, int axis, int a, int b) {
+  for (int r = 0; r < NROW; r++)
+    for (int c = 0; c < NCOL; c++) {
+      struct cell* cl = &g->cells[c][r];
+      if (cl->type != FORMULA) continue;
+      char out[MAXIN] = {0};
+      int oi = 0, changed = 0;
+      const char* s = cl->text;
+      while (*s && oi < MAXIN - 8) {
+        int rc, rr, n = ref(s, &rc, &rr);
+        if (n) {
+          if (axis == 'R') {
+            if (rr == a)
+              rr = b, changed = 1;
+            else if (rr == b)
+              rr = a, changed = 1;
+          } else {
+            if (rc == a)
+              rc = b, changed = 1;
+            else if (rc == b)
+              rc = a, changed = 1;
+          }
+          oi += snprintf(out + oi, MAXIN - oi, "%s%d", col(rc), rr + 1);
+          s += n;
+        } else {
+          out[oi++] = *s++;
+        }
+      }
+      out[oi] = '\0';
+      if (changed) strncpy(cl->text, out, MAXIN - 1);
+    }
+}
+
+// Shift cell references after insert/delete.
+// axis='R' for row, 'C' for column. pos=where inserted/deleted. dir=+1 insert, -1 delete.
+static void shiftrefs(struct grid* g, int axis, int pos, int dir) {
+  for (int r = 0; r < NROW; r++)
+    for (int c = 0; c < NCOL; c++) {
+      struct cell* cl = &g->cells[c][r];
+      if (cl->type != FORMULA) continue;
+      char out[MAXIN] = {0};
+      int oi = 0, changed = 0;
+      const char* s = cl->text;
+      while (*s && oi < MAXIN - 8) {
+        int rc, rr, n = ref(s, &rc, &rr);
+        if (n) {
+          if (axis == 'R') {
+            if (dir > 0 && rr >= pos)
+              rr++, changed = 1;
+            else if (dir < 0 && rr > pos)
+              rr--, changed = 1;
+          } else {
+            if (dir > 0 && rc >= pos)
+              rc++, changed = 1;
+            else if (dir < 0 && rc > pos)
+              rc--, changed = 1;
+          }
+          oi += snprintf(out + oi, MAXIN - oi, "%s%d", col(rc), rr + 1);
+          s += n;
+        } else {
+          out[oi++] = *s++;
+        }
+      }
+      out[oi] = '\0';
+      if (changed) strncpy(cl->text, out, MAXIN - 1);
+    }
+}
+
+static void insertrow(struct grid* g, int at) {
+  for (int c = 0; c < NCOL; c++)
+    for (int r = NROW - 1; r > at; r--) g->cells[c][r] = g->cells[c][r - 1];
+  for (int c = 0; c < NCOL; c++) g->cells[c][at] = (struct cell){0};
+  shiftrefs(g, 'R', at, +1);
+  g->dirty = 1;
+}
+
+static void insertcol(struct grid* g, int at) {
+  for (int r = 0; r < NROW; r++)
+    for (int c = NCOL - 1; c > at; c--) g->cells[c][r] = g->cells[c - 1][r];
+  for (int r = 0; r < NROW; r++) g->cells[at][r] = (struct cell){0};
+  shiftrefs(g, 'C', at, +1);
+  g->dirty = 1;
+}
+
+static void deleterow(struct grid* g, int at) {
+  shiftrefs(g, 'R', at, -1);
+  for (int c = 0; c < NCOL; c++)
+    for (int r = at; r < NROW - 1; r++) g->cells[c][r] = g->cells[c][r + 1];
+  for (int c = 0; c < NCOL; c++) g->cells[c][NROW - 1] = (struct cell){0};
+  g->dirty = 1;
+}
+
+static void deletecol(struct grid* g, int at) {
+  shiftrefs(g, 'C', at, -1);
+  for (int r = 0; r < NROW; r++)
+    for (int c = at; c < NCOL - 1; c++) g->cells[c][r] = g->cells[c + 1][r];
+  for (int r = 0; r < NROW; r++) g->cells[NCOL - 1][r] = (struct cell){0};
+  g->dirty = 1;
 }
 
 void setcell(struct grid* g, int c, int r, const char* input) {
@@ -451,6 +555,77 @@ static void draw(struct grid* g, const char* mode, const char* buf) {
   }
 }
 
+static void swaprow(struct grid* g, int a, int b) {
+  for (int c = 0; c < NCOL; c++) {
+    struct cell tmp = g->cells[c][a];
+    g->cells[c][a] = g->cells[c][b];
+    g->cells[c][b] = tmp;
+  }
+  fixrefs(g, 'R', a, b);
+}
+
+static void swapcol(struct grid* g, int a, int b) {
+  for (int r = 0; r < NROW; r++) {
+    struct cell tmp = g->cells[a][r];
+    g->cells[a][r] = g->cells[b][r];
+    g->cells[b][r] = tmp;
+  }
+  fixrefs(g, 'C', a, b);
+}
+
+void movecmd(struct grid* g) {
+  int origc = g->cc, origr = g->cr;
+  char src[16];
+  snprintf(src, sizeof(src), "%s%d", col(origc), origr + 1);
+  for (;;) {
+    draw(g, "MOVE", "");
+    if (g->cc == origc && g->cr == origr)
+      mvprintw(1, 0, "Source: %s  (move cursor, Esc cancel)", src);
+    else
+      mvprintw(1, 0, "%s...%s%d  (Enter confirm, Esc cancel)", src, col(g->cc), g->cr + 1);
+    clrtoeol();
+    refresh();
+    int k = getch();
+    if (k == 27) {  // cancel: undo all swaps
+      if (g->cc != origc) {
+        while (g->cc < origc) swapcol(g, g->cc, g->cc + 1), g->cc++;
+        while (g->cc > origc) swapcol(g, g->cc, g->cc - 1), g->cc--;
+      } else {
+        while (g->cr < origr) swaprow(g, g->cr, g->cr + 1), g->cr++;
+        while (g->cr > origr) swaprow(g, g->cr, g->cr - 1), g->cr--;
+      }
+      recalc(g);
+      break;
+    } else if (k == 10 || k == 13 || k == KEY_ENTER) {
+      if (g->cc != origc || g->cr != origr) g->dirty = 1;
+      recalc(g);
+      break;
+    } else if (k == KEY_UP && g->cc == origc) {
+      int lo = g->tr > 0 ? g->tr : 0;
+      if (g->cr > lo) {
+        swaprow(g, g->cr, g->cr - 1);
+        g->cr--;
+      }
+    } else if (k == KEY_DOWN && g->cc == origc) {
+      if (g->cr < NROW - 1) {
+        swaprow(g, g->cr, g->cr + 1);
+        g->cr++;
+      }
+    } else if (k == KEY_LEFT && g->cr == origr) {
+      int lo = g->tc > 0 ? g->tc : 0;
+      if (g->cc > lo) {
+        swapcol(g, g->cc, g->cc - 1);
+        g->cc--;
+      }
+    } else if (k == KEY_RIGHT && g->cr == origr) {
+      if (g->cc < NCOL - 1) {
+        swapcol(g, g->cc, g->cc + 1);
+        g->cc++;
+      }
+    }
+  }
+}
+
 //
 //  /B                   Blank current cell value (keep formatting)
 //  /C                   Clear entire spreadsheet (keep formatting)
@@ -459,7 +634,7 @@ static void draw(struct grid* g, const char* mode, const char* buf) {
 //  /IR, /IC             Insert row/column
 //  /GC                  Set column width
 //  /GF(L/R/I/G/D/$/%/*) Set default column format
-//  /M                   Move cell (cut/paste)
+//  /M                   Move row/column
 //  /R                   Replicate cell
 //  /SL                  Load CSV file
 //  /SS                  Save CSV file
@@ -486,37 +661,25 @@ int command(struct grid* g) {
   } else if (ch == 'D') {  // delete row/column
     mvprintw(1, 0, "Delete (R)ow or (C)olumn?"), clrtoeol();
     ch = toupper(getch());
-    if (ch == 'R') {
-      for (int c = 0; c < NCOL; c++)
-        for (int r = g->cr; r < NROW - 1; r++) g->cells[c][r] = g->cells[c][r + 1];
-      for (int c = 0; c < NCOL; c++) g->cells[c][NROW - 1] = (struct cell){0};
-      g->dirty = 1;
-    } else if (ch == 'C') {
-      for (int r = 0; r < NROW; r++)
-        for (int c = g->cc; c < NCOL - 1; c++) g->cells[c][r] = g->cells[c + 1][r];
-      for (int r = 0; r < NROW; r++) g->cells[NCOL - 1][r] = (struct cell){0};
-      g->dirty = 1;
-    }
-  } else if (ch == 'I') {
+    if (ch == 'R')
+      deleterow(g, g->cr);
+    else if (ch == 'C')
+      deletecol(g, g->cc);
+    recalc(g);
+  } else if (ch == 'I') {  // insert row/column
     mvprintw(1, 0, "Insert (R)ow or (C)olumn?"), clrtoeol();
     ch = toupper(getch());
-    if (ch == 'R') {
-      for (int c = 0; c < NCOL; c++)
-        for (int r = NROW - 1; r > g->cr; r--) g->cells[c][r] = g->cells[c][r - 1];
-      for (int c = 0; c < NCOL; c++) g->cells[c][g->cr] = (struct cell){0};
-      g->dirty = 1;
-    } else if (ch == 'C') {
-      for (int r = 0; r < NROW; r++)
-        for (int c = NCOL - 1; c > g->cc; c--) g->cells[c][r] = g->cells[c - 1][r];
-      for (int r = 0; r < NROW; r++) g->cells[g->cc][r] = (struct cell){0};
-      g->dirty = 1;
-    }
-  } else if (ch == 'F') {
+    if (ch == 'R')
+      insertrow(g, g->cr);
+    else if (ch == 'C')
+      insertcol(g, g->cc);
+    recalc(g);
+  } else if (ch == 'F') {  // change cell format
     mvprintw(1, 0, "Format: L R I G D $ %% *"), clrtoeol();
     ch = toupper(getch());
     struct cell* cl = cell(g, g->cc, g->cr);
     if (strchr("LRIGD$%*", ch)) cl->fmt = ch;
-  } else if (ch == 'G') {
+  } else if (ch == 'G') {  // change global settings
     mvprintw(1, 0, "Global: (C)ol width or (F)mt?"), clrtoeol();
     ch = toupper(getch());
     if (ch == 'C') {
@@ -544,7 +707,7 @@ int command(struct grid* g) {
       if (strchr("LRIGD$%*", ch)) g->fmt = ch;
     }
   } else if (ch == 'M') {
-    //
+    movecmd(g);
   } else if (ch == 'R') {
     //
   } else if (ch == 'T') {
@@ -976,6 +1139,270 @@ void test_csv_roundtrip(void) {
   assert(g.cells[0][1].val == 42.5f);
 }
 
+void test_swap(void) {
+  struct grid g = {0};
+
+  // Setup: A1=10 A2=20 A3=30, B1=100 B2=200 B3=300
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 0, 1, "20");
+  setcell(&g, 0, 2, "30");
+  setcell(&g, 1, 0, "100");
+  setcell(&g, 1, 1, "200");
+  setcell(&g, 1, 2, "300");
+
+  // Swap rows 0 and 1: A1<->A2, B1<->B2
+  swaprow(&g, 0, 1);
+  assert(g.cells[0][0].val == 20.0f);
+  assert(g.cells[0][1].val == 10.0f);
+  assert(g.cells[1][0].val == 200.0f);
+  assert(g.cells[1][1].val == 100.0f);
+  assert(g.cells[0][2].val == 30.0f);  // row 2 unchanged
+
+  // Swap back
+  swaprow(&g, 0, 1);
+  assert(g.cells[0][0].val == 10.0f);
+  assert(g.cells[0][1].val == 20.0f);
+
+  // Swap columns 0 and 1: A<->B
+  swapcol(&g, 0, 1);
+  assert(g.cells[0][0].val == 100.0f);
+  assert(g.cells[1][0].val == 10.0f);
+  assert(g.cells[0][1].val == 200.0f);
+  assert(g.cells[1][1].val == 20.0f);
+
+  // Swap back
+  swapcol(&g, 0, 1);
+  assert(g.cells[0][0].val == 10.0f);
+  assert(g.cells[1][0].val == 100.0f);
+}
+
+void test_fixrefs(void) {
+  struct grid g = {0};
+
+  // Setup: A1=10, A2=20, formula in B1 referencing A1 and A2
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 0, 1, "20");
+  setcell(&g, 1, 0, "+A1+A2");
+  assert(g.cells[1][0].val == 30.0f);
+
+  // Swap rows 0 and 1: data moves, refs updated
+  // A1(10)->A2, A2(20)->A1, B1(+A1+A2)->B2 with refs swapped to +A2+A1
+  swaprow(&g, 0, 1);
+  recalc(&g);
+  // Formula moved to B2, should still reference the same data (now A2+A1 = 10+20)
+  assert(g.cells[1][1].val == 30.0f);
+  assert(strcmp(g.cells[1][1].text, "+A2+A1") == 0);
+  // Data swapped
+  assert(g.cells[0][0].val == 20.0f);  // was A2
+  assert(g.cells[0][1].val == 10.0f);  // was A1
+
+  // Swap back: everything restored
+  swaprow(&g, 0, 1);
+  recalc(&g);
+  assert(g.cells[1][0].val == 30.0f);
+  assert(strcmp(g.cells[1][0].text, "+A1+A2") == 0);
+
+  // Column swap: A1=10, B1=100, C1=+A1+B1
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 1, 0, "100");
+  setcell(&g, 2, 0, "+A1+B1");
+  assert(g.cells[2][0].val == 110.0f);
+
+  // Swap cols A and B: data moves, refs updated
+  swapcol(&g, 0, 1);
+  recalc(&g);
+  assert(g.cells[0][0].val == 100.0f);  // was B
+  assert(g.cells[1][0].val == 10.0f);   // was A
+  assert(strcmp(g.cells[2][0].text, "+B1+A1") == 0);
+  assert(g.cells[2][0].val == 110.0f);  // still 10+100
+
+  // Swap back
+  swapcol(&g, 0, 1);
+  recalc(&g);
+  assert(strcmp(g.cells[2][0].text, "+A1+B1") == 0);
+  assert(g.cells[2][0].val == 110.0f);
+
+  // Refs to uninvolved rows/cols stay unchanged
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "1");
+  setcell(&g, 0, 1, "2");
+  setcell(&g, 0, 2, "3");
+  setcell(&g, 1, 0, "+A3");  // references row 2, not involved in swap of 0,1
+  assert(g.cells[1][0].val == 3.0f);
+  swaprow(&g, 0, 1);
+  recalc(&g);
+  // formula moved to B2, A3 ref unchanged since row 2 not swapped
+  assert(strcmp(g.cells[1][1].text, "+A3") == 0);
+  assert(g.cells[1][1].val == 3.0f);
+
+  // SUM range refs get updated
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "5");
+  setcell(&g, 0, 1, "10");
+  setcell(&g, 0, 2, "15");
+  setcell(&g, 1, 0, "+@SUM(A1...A3)");
+  assert(g.cells[1][0].val == 30.0f);
+  swaprow(&g, 0, 1);
+  recalc(&g);
+  // formula moved to B2, range refs swapped: A1->A2, A3 stays
+  assert(strcmp(g.cells[1][1].text, "+@SUM(A2...A3)") == 0);
+  assert(g.cells[1][1].val == 20.0f);  // A2(5)+A3(15), range shrank
+
+  // Multiple swaps (move row 0 to row 2 via two swaps)
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "1");
+  setcell(&g, 0, 1, "2");
+  setcell(&g, 0, 2, "3");
+  setcell(&g, 1, 0, "+A1");
+  swaprow(&g, 0, 1);  // row0<->row1
+  swaprow(&g, 1, 2);  // row1<->row2 (original row0 now at row2)
+  recalc(&g);
+  assert(g.cells[0][2].val == 1.0f);  // original A1 data
+  assert(g.cells[1][2].val == 1.0f);  // formula followed the data
+  assert(strcmp(g.cells[1][2].text, "+A3") == 0);
+
+  // Formula not in swapped rows still gets refs updated
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");
+  setcell(&g, 0, 1, "20");
+  setcell(&g, 0, 2, "+A1+A2");  // in row 2, refs rows 0 and 1
+  swaprow(&g, 0, 1);
+  recalc(&g);
+  assert(strcmp(g.cells[0][2].text, "+A2+A1") == 0);
+  assert(g.cells[0][2].val == 30.0f);  // still 10+20
+}
+
+void test_insert_delete(void) {
+  struct grid g = {0};
+
+  // --- Insert row: data shifts down, refs adjust ---
+  setcell(&g, 0, 0, "10");   // A1=10
+  setcell(&g, 0, 1, "20");   // A2=20
+  setcell(&g, 0, 2, "30");   // A3=30
+  setcell(&g, 1, 0, "+A2");  // B1=+A2 (=20)
+  assert(g.cells[1][0].val == 20.0f);
+
+  // Insert row at 1 (between A1 and A2): A2->A3, A3->A4
+  insertrow(&g, 1);
+  recalc(&g);
+  assert(g.cells[0][0].val == 10.0f);   // A1 unchanged
+  assert(g.cells[0][1].type == EMPTY);  // A2 is new blank row
+  assert(g.cells[0][2].val == 20.0f);   // old A2 -> A3
+  assert(g.cells[0][3].val == 30.0f);   // old A3 -> A4
+  // B1 formula should now reference A3 (was A2, shifted +1)
+  assert(strcmp(g.cells[1][0].text, "+A3") == 0);
+  assert(g.cells[1][0].val == 20.0f);
+
+  // --- Delete that inserted row: refs shrink back ---
+  deleterow(&g, 1);
+  recalc(&g);
+  assert(g.cells[0][0].val == 10.0f);
+  assert(g.cells[0][1].val == 20.0f);
+  assert(g.cells[0][2].val == 30.0f);
+  assert(strcmp(g.cells[1][0].text, "+A2") == 0);
+  assert(g.cells[1][0].val == 20.0f);
+
+  // --- Insert column: data shifts right, refs adjust ---
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");      // A1=10
+  setcell(&g, 1, 0, "20");      // B1=20
+  setcell(&g, 2, 0, "+A1+B1");  // C1=+A1+B1 (=30)
+  assert(g.cells[2][0].val == 30.0f);
+
+  // Insert column at 1 (between A and B): B->C, C->D
+  insertcol(&g, 1);
+  recalc(&g);
+  assert(g.cells[0][0].val == 10.0f);   // A1 unchanged
+  assert(g.cells[1][0].type == EMPTY);  // B1 is new blank col
+  assert(g.cells[2][0].val == 20.0f);   // old B1 -> C1
+  // Formula moved to D1, refs A1 unchanged, B1->C1
+  assert(strcmp(g.cells[3][0].text, "+A1+C1") == 0);
+  assert(g.cells[3][0].val == 30.0f);
+
+  // --- Delete that inserted column ---
+  deletecol(&g, 1);
+  recalc(&g);
+  assert(g.cells[0][0].val == 10.0f);
+  assert(g.cells[1][0].val == 20.0f);
+  assert(strcmp(g.cells[2][0].text, "+A1+B1") == 0);
+  assert(g.cells[2][0].val == 30.0f);
+
+  // --- Delete row that is referenced: refs to later rows shift ---
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");   // A1=10
+  setcell(&g, 0, 1, "20");   // A2=20
+  setcell(&g, 0, 2, "30");   // A3=30
+  setcell(&g, 1, 0, "+A3");  // B1=+A3 (=30)
+  assert(g.cells[1][0].val == 30.0f);
+
+  // Delete row 1 (A2): A3->A2
+  deleterow(&g, 1);
+  recalc(&g);
+  assert(g.cells[0][0].val == 10.0f);
+  assert(g.cells[0][1].val == 30.0f);              // old A3 is now A2
+  assert(strcmp(g.cells[1][0].text, "+A2") == 0);  // ref shifted
+  assert(g.cells[1][0].val == 30.0f);
+
+  // --- Insert at row 0: all refs shift ---
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "5");
+  setcell(&g, 0, 1, "10");
+  setcell(&g, 1, 1, "+A1");  // B2=+A1 (=5)
+  assert(g.cells[1][1].val == 5.0f);
+
+  insertrow(&g, 0);
+  recalc(&g);
+  assert(g.cells[0][0].type == EMPTY);  // new blank row
+  assert(g.cells[0][1].val == 5.0f);    // old A1 -> A2
+  assert(g.cells[0][2].val == 10.0f);   // old A2 -> A3
+  // B2's formula was +A1, shifted to +A2 and moved to B3
+  assert(strcmp(g.cells[1][2].text, "+A2") == 0);
+  assert(g.cells[1][2].val == 5.0f);
+
+  // --- SUM range adjusts on insert ---
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "1");
+  setcell(&g, 0, 1, "2");
+  setcell(&g, 0, 2, "3");
+  setcell(&g, 1, 0, "+@SUM(A1...A3)");
+  assert(g.cells[1][0].val == 6.0f);
+
+  // Insert row at 1: range A1...A3 becomes A1...A4
+  insertrow(&g, 1);
+  recalc(&g);
+  assert(strcmp(g.cells[1][0].text, "+@SUM(A1...A4)") == 0);
+  assert(g.cells[1][0].val == 6.0f);  // new blank row adds 0
+
+  // --- Delete column that is referenced ---
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "10");   // A1
+  setcell(&g, 1, 0, "20");   // B1
+  setcell(&g, 2, 0, "30");   // C1
+  setcell(&g, 3, 0, "+C1");  // D1=+C1 (=30)
+  assert(g.cells[3][0].val == 30.0f);
+
+  // Delete col B (index 1): C->B, D->C, ref C1->B1
+  deletecol(&g, 1);
+  recalc(&g);
+  assert(g.cells[0][0].val == 10.0f);
+  assert(g.cells[1][0].val == 30.0f);              // old C1 is now B1
+  assert(strcmp(g.cells[2][0].text, "+B1") == 0);  // ref shifted
+  assert(g.cells[2][0].val == 30.0f);
+
+  // --- Multiple inserts ---
+  memset(&g, 0, sizeof(g));
+  setcell(&g, 0, 0, "42");
+  setcell(&g, 1, 0, "+A1");
+  insertrow(&g, 0);
+  insertrow(&g, 0);
+  recalc(&g);
+  // A1 was shifted twice to A3
+  assert(g.cells[0][2].val == 42.0f);
+  assert(strcmp(g.cells[1][2].text, "+A3") == 0);
+  assert(g.cells[1][2].val == 42.0f);
+}
+
 int main(void) {
   test_expr();
   test_recalc();
@@ -984,6 +1411,9 @@ int main(void) {
   test_csv_load();
   test_csv_save();
   test_csv_roundtrip();
+  test_swap();
+  test_fixrefs();
+  test_insert_delete();
   return 0;
 }
 #endif
