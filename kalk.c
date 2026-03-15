@@ -346,8 +346,42 @@ static char* col(int c) {
   return buf;
 }
 
+static void fmtcell(struct grid* g, struct cell* cl, char* fb, int cw) {
+  if (!cl || cl->type == EMPTY) {
+    memset(fb, ' ', cw);
+    fb[cw] = '\0';
+  } else if (cl->type == LABEL) {
+    snprintf(fb, cw + 1, "%-*.*s", cw, cw, cl->text[0] == '"' ? cl->text + 1 : cl->text);
+  } else if (isnan(cl->val)) {
+    snprintf(fb, cw + 1, "%*s", cw, "ERROR");
+  } else {
+    char t[MAXIN] = {0}, fmt = cl->fmt;
+    if (!fmt || fmt == 'D') fmt = g->fmt;
+    if (fmt == '$') {
+      snprintf(t, sizeof(t), "%.2f", cl->val);
+    } else if (fmt == '%') {
+      snprintf(t, sizeof(t), "%.2f%%", cl->val * 100);
+    } else if (fmt == '*') {
+      for (int i = 0; i < cw && i < cl->val; i++) t[i] = '*';
+      fmt = 'L';
+    } else if (fmt == 'I' || (cl->val == (long)cl->val && fabs(cl->val) < 1e9)) {
+      snprintf(t, sizeof(t), "%ld", (long)cl->val);
+    } else {
+      snprintf(t, sizeof(t), "%g", cl->val);
+    }
+    snprintf(fb, cw + 1, fmt == 'L' ? "%-*s" : "%*s", cw, t);
+  }
+}
+
 static void draw(struct grid* g, const char* mode, const char* buf) {
   erase();
+
+  int lc = g->tc;         // locked title columns
+  int lr = g->tr;         // locked title rows
+  int fc = vcols() - lc;  // free scrollable column slots
+  int fr = vrows() - lr;  // free scrollable row slots
+  if (fc < 1) fc = 1;
+  if (fr < 1) fr = 1;
 
   // Status bar
   attron(A_BOLD | A_REVERSE);
@@ -377,55 +411,42 @@ static void draw(struct grid* g, const char* mode, const char* buf) {
   attron(A_BOLD | A_REVERSE);
   move(2, 0);
   clrtoeol();
-  for (int c = 0; c < vcols() && g->vc + c < NCOL; c++)
-    mvprintw(2, GW + c * CW, "%*s", CW, col(g->vc + c));
+  for (int ci = 0; ci < lc + fc; ci++) {
+    int c = (ci < lc) ? ci : g->vc + (ci - lc);
+    if (c >= NCOL) break;
+    mvprintw(2, GW + ci * CW, "%*s", CW, col(c));
+  }
   attroff(A_BOLD | A_REVERSE);
 
-  // Grid cells
-  for (int r = 0; r < vrows() && g->vr + r < NROW; r++) {
-    int row = g->vr + r, y = 3 + r;
+  // Grid rows: locked title rows first, then scrollable rows
+  for (int ri = 0; ri < lr + fr; ri++) {
+    int row = (ri < lr) ? ri : g->vr + (ri - lr);
+    if (row >= NROW) continue;
+    int y = 3 + ri;
+    int is_locked_row = (ri < lr);
+
     move(y, 0);
     clrtoeol();
     attron(A_REVERSE);
     mvprintw(y, 0, "%*d ", GW - 1, row + 1);
     attroff(A_REVERSE);
 
-    for (int c = 0; c < vcols() && g->vc + c < NCOL; c++) {
-      int col = g->vc + c;
-      struct cell* cl = cell(g, col, row);
+    for (int ci = 0; ci < lc + fc; ci++) {
+      int c = (ci < lc) ? ci : g->vc + (ci - lc);
+      if (c >= NCOL) break;
+      int is_locked_col = (ci < lc);
+
+      struct cell* cl = cell(g, c, row);
       char fb[64];
+      fmtcell(g, cl, fb, CW);
 
-      if (!cl || cl->type == EMPTY) {
-        memset(fb, ' ', CW);
-        fb[CW] = '\0';
-      } else if (cl->type == LABEL)
-        snprintf(fb, CW + 1, "%-*.*s", CW, CW, cl->text[0] == '"' ? cl->text + 1 : cl->text);
-      else if (isnan(cl->val)) {
-        snprintf(fb, CW + 1, "%*s", CW, "ERROR");
-      } else {
-        char t[MAXIN] = {0}, fmt = cl->fmt;
-        if (!fmt || fmt == 'D')
-          fmt = g->fmt;  // use default format
-                         // L R I G D $ % *
-        if (fmt == '$') {
-          snprintf(t, sizeof(t), "%.2f", cl->val);
-        } else if (fmt == '%') {
-          snprintf(t, sizeof(t), "%.2f%%", cl->val * 100);
-        } else if (fmt == '*') {
-          for (int i = 0; i < CW && i < cl->val; i++) t[i] = '*';
-          fmt = 'L';
-        } else if (fmt == 'I' || (cl->val == (long)cl->val && fabs(cl->val) < 1e9)) {
-          snprintf(t, sizeof(t), "%ld", (long)cl->val);
-        } else {
-          snprintf(t, sizeof(t), "%g", cl->val);
-        }
-        snprintf(fb, CW + 1, fmt == 'L' ? "%-*s" : "%*s", CW, t);
-      }
-
-      int is_cur = (col == g->cc && row == g->cr);
-      if (is_cur) attron(A_REVERSE);
-      mvprintw(y, GW + c * CW, "%s", fb);
-      if (is_cur) attroff(A_REVERSE);
+      int is_cur = (c == g->cc && row == g->cr);
+      int is_locked = (is_locked_row || is_locked_col);
+      if (is_cur || is_locked) attron(A_REVERSE);
+      if (is_locked && !is_cur) attron(A_BOLD);
+      mvprintw(y, GW + ci * CW, "%s", fb);
+      if (is_locked && !is_cur) attroff(A_BOLD);
+      if (is_cur || is_locked) attroff(A_REVERSE);
     }
   }
 }
@@ -530,13 +551,17 @@ int command(struct grid* g) {
     mvprintw(1, 0, "Lock (V)ertical, (H)orizontal, (B)oth, or (N)one?"), clrtoeol();
     ch = toupper(getch());
     if (ch == 'V') {
-      g->tc = g->cc, g->tr = -1;
+      g->tc = g->cc + 1, g->tr = 0;
+      g->cc++;  // move cursor past locked columns
     } else if (ch == 'H') {
-      g->tr = g->cr, g->tc = -1;
+      g->tr = g->cr + 1, g->tc = 0;
+      g->cr++;  // move cursor past locked rows
     } else if (ch == 'B') {
-      g->tc = g->cc, g->tr = g->cr;
+      g->tc = g->cc + 1, g->tr = g->cr + 1;
+      g->cc++;
+      g->cr++;
     } else if (ch == 'N') {
-      g->tc = g->tr = -1;
+      g->tc = g->tr = 0;
     }
   } else if (ch == 'S') {
     mvprintw(1, 0, "Storage: (L)oad, (S)ave, or save & (Q)uit?"), clrtoeol();
@@ -679,26 +704,47 @@ void entry(struct grid* g, int label, int ch) {
 
 void loop(struct grid* g) {
   for (;;) {
-    if (g->cc < g->vc) g->vc = g->cc;
-    if (g->cc >= g->vc + vcols()) g->vc = g->cc - vcols() + 1;
-    if (g->cr < g->vr) g->vr = g->cr;
-    if (g->cr >= g->vr + vrows()) g->vr = g->cr - vrows() + 1;
+    int lc = g->tc;
+    int lr = g->tr;
+    int fc = vcols() - lc;
+    if (fc < 1) fc = 1;
+    int fr = vrows() - lr;
+    if (fr < 1) fr = 1;
+
+    // Clamp cursor out of locked title area
+    if (lc > 0 && g->cc < lc) g->cc = lc;
+    if (lr > 0 && g->cr < lr) g->cr = lr;
+
+    // Viewport must not overlap with locked area
+    if (lc > 0 && g->vc < lc) g->vc = lc;
+    if (lr > 0 && g->vr < lr) g->vr = lr;
+
+    // Keep cursor visible in scrollable region
+    if (g->cc >= lc) {
+      if (g->cc < g->vc) g->vc = g->cc;
+      if (g->cc >= g->vc + fc) g->vc = g->cc - fc + 1;
+    }
+    if (g->cr >= lr) {
+      if (g->cr < g->vr) g->vr = g->cr;
+      if (g->cr >= g->vr + fr) g->vr = g->cr - fr + 1;
+    }
     draw(g, "READY", "");
     int ch = getch();
 
     if (ch == (0x1f & 'c'))  // Ctrl+C: quit
       break;
-    else if (ch == KEY_UP && g->cr > 0)
+    else if (ch == KEY_UP && g->cr > lr)
       g->cr--;
     else if (ch == KEY_DOWN && g->cr < NROW - 1)
       g->cr++;
-    else if (ch == KEY_LEFT && g->cc > 0)
+    else if (ch == KEY_LEFT && g->cc > lc)
       g->cc--;
     else if (ch == KEY_RIGHT && g->cc < NCOL - 1)
       g->cc++;
-    else if (ch == KEY_HOME)
-      g->cc = g->cr = 0;
-    else if (ch == 9 && g->cc < NCOL - 1)  // Tab: next cell
+    else if (ch == KEY_HOME) {
+      g->cc = lc;
+      g->cr = lr;
+    } else if (ch == 9 && g->cc < NCOL - 1)  // Tab: next cell
       g->cc++;
     else if (ch == 10 || ch == 13 || ch == KEY_ENTER) {  // Enter: next row
       if (g->cr < NROW - 1) g->cr++;
