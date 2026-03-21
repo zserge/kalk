@@ -1046,7 +1046,7 @@ void nav(struct grid* g) {
 // entry mode: edit cell content, label mode if label=1 or ch is non-formula starter
 void entry(struct grid* g, int label, int ch) {
   char buf[MAXIN] = {0};
-  int n;
+  int n = 0;
   draw(g, "ENTRY", "");
   if (ch) buf[n++] = ch;
   for (;;) {
